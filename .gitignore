@@ -1,0 +1,9 @@
+.venv/
+.env
+cache/
+output/
+hosts/*
+!hosts/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store
