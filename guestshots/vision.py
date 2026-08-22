@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+DEFAULT_MODEL = "openai/gpt-5.4-mini"
 
 
 class ShotRating(BaseModel):

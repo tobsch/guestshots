@@ -50,7 +50,7 @@ uv run guestshots URL1 URL2 URL3            # mehrere Folgen in einem Rutsch
 | `--host-dir` | `hosts/` | Ordner mit Referenzfotos des Hosts |
 | `--guest-id N` | — | Gast-Identität erzwingen (siehe `identities/`-Crops) |
 | `--llm / --no-llm` | an | LLM-Re-Ranking über OpenRouter |
-| `--llm-model` | `anthropic/claude-sonnet-5` | beliebiges OpenRouter-Vision-Modell, z.B. `google/gemini-2.5-pro` |
+| `--llm-model` | `openai/gpt-5.4-mini` | beliebiges OpenRouter-Vision-Modell, z.B. `google/gemini-2.5-pro` |
 | `--llm-pool` | 4 | Kandidaten pro finalem Shot, die ans LLM gehen (n × pool Bilder) |
 
 Dauer: ~10 min für eine 80-min-Folge beim ersten Lauf (Download + Gesichtserkennung), danach Sekunden — Video und Detektionen werden in `cache/` gecached.
@@ -81,7 +81,7 @@ output/<id>_<titel>/
 
 ## Kosten
 
-Nur die LLM-Stufe kostet: gemessen **$0.035 pro Video** (24 Bilder, `anthropic/claude-sonnet-5`). Der Rest läuft lokal. Die Usage-Zeile wird bei jedem Lauf ausgegeben.
+Nur die LLM-Stufe kostet: **~1 Cent pro Video** (24 Bilder, `openai/gpt-5.4-mini`; Sonnet wäre ~3,5 Cent und beim Augen-Check nicht besser). Der Rest läuft lokal. Die Usage-Zeile wird bei jedem Lauf ausgegeben.
 
 ## Hinweise / Troubleshooting
 

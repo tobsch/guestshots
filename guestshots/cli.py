@@ -96,7 +96,7 @@ def main(
     guest_id: int | None = typer.Option(None, help="Force identity id as guest (see identities/ crops)"),
     solo_only: bool = typer.Option(False, help="Only frames where the guest is alone in the picture"),
     llm: bool = typer.Option(True, help="Re-rank top candidates with a vision LLM via OpenRouter (needs OPENROUTER_API_KEY)"),
-    llm_model: str = typer.Option("anthropic/claude-sonnet-5", help="OpenRouter model id for re-ranking"),
+    llm_model: str = typer.Option("openai/gpt-5.4-mini", help="OpenRouter model id for re-ranking"),
     llm_pool: int = typer.Option(4, help="Candidates per final shot sent to Claude (n × llm_pool)"),
 ):
     """Download each video, find the guest (not the host), and save N flattering + active screenshots."""
