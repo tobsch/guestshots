@@ -71,7 +71,7 @@ output/<id>_<title>/
 The same pipeline as a self-hosted REST API + single-page web app. Stateless by design: host photos are uploaded with every job (the web app keeps them in the browser's IndexedDB), jobs live as plain directories under `/data` (no database) and expire after `GUESTSHOTS_JOB_TTL_DAYS`.
 
 ```bash
-cp .env.example .env        # GUESTSHOTS_API_KEY (any random string) + OPENROUTER_API_KEY
+cp .env.example .env        # GUESTSHOTS_API_KEYS="name:key,name:key" (one per person; each only sees their own jobs) + OPENROUTER_API_KEY
 docker compose up -d        # pulls ghcr.io/tobsch/guestshots:latest, listens on :8765
 ```
 

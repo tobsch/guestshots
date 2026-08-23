@@ -7,7 +7,7 @@ services:
     ports:
       - "8765:8765"
     environment:
-      GUESTSHOTS_API_KEY: ${GUESTSHOTS_API_KEY}
+      GUESTSHOTS_API_KEYS: ${GUESTSHOTS_API_KEYS}   # "name:key,name:key" — one key per person, each sees only their jobs
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       GUESTSHOTS_JOB_TTL_DAYS: "7"
       GUESTSHOTS_CACHE_TTL_HOURS: "24"

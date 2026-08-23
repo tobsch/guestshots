@@ -29,7 +29,14 @@ from . import pipeline as P
 DATA = Path(os.environ.get("GUESTSHOTS_DATA", "/data"))
 JOBS = DATA / "jobs"
 CACHE = DATA / "cache"
-API_KEY = os.environ.get("GUESTSHOTS_API_KEY", "")
+# Keys: GUESTSHOTS_API_KEYS="tobi:abc123,iskender:def456" (name:key pairs) and/or legacy GUESTSHOTS_API_KEY=abc123.
+API_KEYS: dict[str, str] = {}  # key -> owner name
+for _pair in os.environ.get("GUESTSHOTS_API_KEYS", "").split(","):
+    if ":" in _pair:
+        _name, _key = _pair.split(":", 1)
+        API_KEYS[_key.strip()] = _name.strip()
+if os.environ.get("GUESTSHOTS_API_KEY"):
+    API_KEYS[os.environ["GUESTSHOTS_API_KEY"]] = "default"
 JOB_TTL = float(os.environ.get("GUESTSHOTS_JOB_TTL_DAYS", "7")) * 86400
 CACHE_TTL = float(os.environ.get("GUESTSHOTS_CACHE_TTL_HOURS", "24")) * 3600
 MAX_HOSTS = 10
@@ -40,12 +47,14 @@ app = FastAPI(title="guestshots", docs_url="/api/docs", openapi_url="/api/openap
 
 # ---------- auth ----------
 
-def require_key(request: Request) -> None:
-    if not API_KEY:
-        raise HTTPException(500, "GUESTSHOTS_API_KEY not configured")
-    key = request.headers.get("x-api-key") or request.query_params.get("key")
-    if key != API_KEY:
+def require_key(request: Request) -> str:
+    """Returns the owner name of the presented key. Each owner only sees their own jobs."""
+    if not API_KEYS:
+        raise HTTPException(500, "GUESTSHOTS_API_KEYS not configured")
+    key = request.headers.get("x-api-key") or request.query_params.get("key") or ""
+    if key not in API_KEYS:
         raise HTTPException(401, "invalid api key")
+    return API_KEYS[key]
 
 
 # ---------- jobs on disk ----------
@@ -66,6 +75,7 @@ class Job:
     shots: list[str] = field(default_factory=list)
     finished: float | None = None
     n_hosts: int = 0
+    owner: str = "default"
 
     @property
     def dir(self) -> Path:
@@ -181,7 +191,7 @@ def _startup() -> None:
 
 # ---------- API ----------
 
-async def _create_job(url: str, hosts: list[UploadFile], n: int, solo_only: bool, min_gap: float,
+async def _create_job(owner: str, url: str, hosts: list[UploadFile], n: int, solo_only: bool, min_gap: float,
                       llm: bool, llm_model: str, llm_pool: int, guest_id: int | None, host_sim: float) -> Job:
     if not P_video_id(url):
         raise HTTPException(400, "not a YouTube URL")
@@ -191,7 +201,7 @@ async def _create_job(url: str, hosts: list[UploadFile], n: int, solo_only: bool
             opts=asdict(P.Options(n=max(1, min(n, 30)), min_gap=min_gap, solo_only=solo_only, llm=llm,
                                   llm_model=llm_model, llm_pool=max(1, min(llm_pool, 8)),
                                   guest_id=guest_id, host_sim=host_sim)),
-            n_hosts=len(hosts))
+            n_hosts=len(hosts), owner=owner)
     (j.dir / "hosts").mkdir(parents=True)
     for i, h in enumerate(hosts):
         ext = Path(h.filename or "x.jpg").suffix.lower() or ".jpg"
@@ -205,40 +215,41 @@ async def _create_job(url: str, hosts: list[UploadFile], n: int, solo_only: bool
     return j
 
 
-@app.post("/api/jobs", status_code=202, dependencies=[Depends(require_key)])
+@app.post("/api/jobs", status_code=202)
 async def create_job(
+    owner: str = Depends(require_key),
     url: str = Form(...), hosts: list[UploadFile] = File(default=[]),
     n: int = Form(5), solo_only: bool = Form(False), min_gap: float = Form(20.0),
     llm: bool = Form(True), llm_model: str = Form("openai/gpt-5.4-mini"), llm_pool: int = Form(4),
     guest_id: int | None = Form(None), host_sim: float = Form(0.45),
 ):
-    j = await _create_job(url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
+    j = await _create_job(owner, url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
     return _public(j)
 
 
-@app.get("/api/jobs", dependencies=[Depends(require_key)])
-def list_jobs():
+@app.get("/api/jobs")
+def list_jobs(owner: str = Depends(require_key)):
     with _lock:
-        return [_public(j) for j in sorted(_jobs.values(), key=lambda x: x.created, reverse=True)]
+        return [_public(j) for j in sorted(_jobs.values(), key=lambda x: x.created, reverse=True) if j.owner == owner]
 
 
-def _get(jid: str) -> Job:
+def _get(jid: str, owner: str) -> Job:
     j = _jobs.get(jid)
-    if not j:
+    if not j or j.owner != owner:
         raise HTTPException(404, "no such job")
     return j
 
 
-@app.get("/api/jobs/{jid}", dependencies=[Depends(require_key)])
-def get_job(jid: str):
+@app.get("/api/jobs/{jid}")
+def get_job(jid: str, owner: str = Depends(require_key)):
     with _lock:
-        return _public(_get(jid))
+        return _public(_get(jid, owner))
 
 
-@app.delete("/api/jobs/{jid}", dependencies=[Depends(require_key)])
-def delete_job(jid: str):
+@app.delete("/api/jobs/{jid}")
+def delete_job(jid: str, owner: str = Depends(require_key)):
     with _lock:
-        j = _get(jid)
+        j = _get(jid, owner)
         if j.status == "running":
             raise HTTPException(409, "job is running")
         shutil.rmtree(j.dir, ignore_errors=True)
@@ -246,9 +257,9 @@ def delete_job(jid: str):
     return {"deleted": jid}
 
 
-@app.get("/api/jobs/{jid}/events", dependencies=[Depends(require_key)])
-async def job_events(jid: str):
-    _get(jid)
+@app.get("/api/jobs/{jid}/events")
+async def job_events(jid: str, owner: str = Depends(require_key)):
+    _get(jid, owner)
 
     async def gen():
         last = None
@@ -276,29 +287,29 @@ def _file(j: Job, rel: str) -> FileResponse:
     return FileResponse(p)
 
 
-@app.get("/api/jobs/{jid}/shots/{name}", dependencies=[Depends(require_key)])
-def get_shot(jid: str, name: str):
-    return _file(_get(jid), f"shots/{name}")
+@app.get("/api/jobs/{jid}/shots/{name}")
+def get_shot(jid: str, name: str, owner: str = Depends(require_key)):
+    return _file(_get(jid, owner), f"shots/{name}")
 
 
-@app.get("/api/jobs/{jid}/contact_sheet.jpg", dependencies=[Depends(require_key)])
-def get_sheet(jid: str):
-    return _file(_get(jid), "contact_sheet.jpg")
+@app.get("/api/jobs/{jid}/contact_sheet.jpg")
+def get_sheet(jid: str, owner: str = Depends(require_key)):
+    return _file(_get(jid, owner), "contact_sheet.jpg")
 
 
-@app.get("/api/jobs/{jid}/report.json", dependencies=[Depends(require_key)])
-def get_report(jid: str):
-    return _file(_get(jid), "report.json")
+@app.get("/api/jobs/{jid}/report.json")
+def get_report(jid: str, owner: str = Depends(require_key)):
+    return _file(_get(jid, owner), "report.json")
 
 
-@app.get("/api/jobs/{jid}/identities/{name}", dependencies=[Depends(require_key)])
-def get_identity(jid: str, name: str):
-    return _file(_get(jid), f"identities/{name}")
+@app.get("/api/jobs/{jid}/identities/{name}")
+def get_identity(jid: str, name: str, owner: str = Depends(require_key)):
+    return _file(_get(jid, owner), f"identities/{name}")
 
 
-@app.get("/api/jobs/{jid}/identities", dependencies=[Depends(require_key)])
-def list_identities(jid: str):
-    j = _get(jid)
+@app.get("/api/jobs/{jid}/identities")
+def list_identities(jid: str, owner: str = Depends(require_key)):
+    j = _get(jid, owner)
     return sorted(p.name for p in (j.dir / "out" / "identities").glob("*.jpg"))
 
 
@@ -313,24 +324,25 @@ def _zip(j: Job) -> bytes:
     return buf.getvalue()
 
 
-@app.get("/api/jobs/{jid}/shots.zip", dependencies=[Depends(require_key)])
-def get_zip(jid: str):
-    j = _get(jid)
+@app.get("/api/jobs/{jid}/shots.zip")
+def get_zip(jid: str, owner: str = Depends(require_key)):
+    j = _get(jid, owner)
     if j.status != "done":
         raise HTTPException(409, f"job is {j.status}")
     return Response(_zip(j), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="guestshots_{P_video_id(j.url)}.zip"'})
 
 
-@app.post("/api/shots", dependencies=[Depends(require_key)])
+@app.post("/api/shots")
 async def sync_shots(
+    owner: str = Depends(require_key),
     url: str = Form(...), hosts: list[UploadFile] = File(default=[]),
     n: int = Form(5), solo_only: bool = Form(False), min_gap: float = Form(20.0),
     llm: bool = Form(True), llm_model: str = Form("openai/gpt-5.4-mini"), llm_pool: int = Form(4),
     guest_id: int | None = Form(None), host_sim: float = Form(0.45), timeout: int = Form(2700),
 ):
     """Synchronous variant: blocks until the job is done and returns the ZIP (for scripts / agents)."""
-    j = await _create_job(url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
+    j = await _create_job(owner, url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
     t0 = time.time()
     while j.status not in ("done", "failed"):
         if time.time() - t0 > timeout:
@@ -349,7 +361,7 @@ def health():
         return {"ok": True, "jobs": len(_jobs),
                 "running": sum(1 for j in _jobs.values() if j.status == "running"),
                 "queued": sum(1 for j in _jobs.values() if j.status == "queued"),
-                "llm": bool(os.environ.get("OPENROUTER_API_KEY"))}
+                "llm": bool(os.environ.get("OPENROUTER_API_KEY")), "keys": len(API_KEYS)}
 
 
 @app.get("/", response_class=HTMLResponse)
