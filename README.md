@@ -66,6 +66,38 @@ output/<id>_<title>/
   report.json                     ← timestamps, scores, LLM notes
 ```
 
+## Web service (Docker)
+
+The same pipeline as a self-hosted REST API + single-page web app. Stateless by design: host photos are uploaded with every job (the web app keeps them in the browser's IndexedDB), jobs live as plain directories under `/data` (no database) and expire after `GUESTSHOTS_JOB_TTL_DAYS`.
+
+```bash
+cp .env.example .env        # GUESTSHOTS_API_KEY (any random string) + OPENROUTER_API_KEY
+docker compose up -d        # pulls ghcr.io/tobsch/guestshots:latest, listens on :8765
+```
+
+Open `http://<host>:8765/`, enter the API key once, drop host photos, paste a URL. Image is built by GitHub Actions on every push to `main` (`linux/amd64`, InsightFace models baked in).
+
+**API** (all endpoints need `X-Api-Key: …` header or `?key=…`):
+
+| | |
+|---|---|
+| `POST /api/jobs` (multipart: `url`, `hosts[]`, `n`, `solo_only`, `min_gap`, `llm`, `llm_model`, `llm_pool`, `guest_id`) | → `202 {id, …}` |
+| `GET /api/jobs`, `GET /api/jobs/{id}` | list / status (`queued · running · done · failed`, stage, progress, log) |
+| `GET /api/jobs/{id}/events` | server-sent events with the same JSON until done |
+| `GET /api/jobs/{id}/shots/{file}` | one screenshot (JPEG, full resolution) |
+| `GET /api/jobs/{id}/shots.zip` | all shots + contact sheet + report |
+| `GET /api/jobs/{id}/contact_sheet.jpg`, `…/report.json`, `…/identities` | extras |
+| `DELETE /api/jobs/{id}` | remove job and its files |
+| `POST /api/shots` (same form fields, optional `timeout`) | **synchronous**: blocks until done, returns the ZIP — for scripts and agents |
+| `GET /api/health` | unauthenticated liveness |
+
+```bash
+curl -H "X-Api-Key: $KEY" -F url='https://youtu.be/XXXX' -F hosts=@me.jpg -F n=6 -F solo_only=true \
+     https://guestshots.example/api/shots -o shots.zip
+```
+
+Tuning: one worker processes jobs sequentially (CPU-bound); `OMP_NUM_THREADS`, `cpus` and `mem_limit` in `compose.yaml` cap what it takes from the host. `GUESTSHOTS_CACHE_TTL_HOURS` controls how long downloaded videos stay for re-runs.
+
 ## How it works
 
 1. `yt-dlp` downloads the video (≤1080p), `ffmpeg` extracts 1 frame/s.
