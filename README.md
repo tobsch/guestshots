@@ -96,7 +96,7 @@ curl -H "X-Api-Key: $KEY" -F url='https://youtu.be/XXXX' -F hosts=@me.jpg -F n=6
      https://guestshots.example/api/shots -o shots.zip
 ```
 
-Tuning: one worker processes jobs sequentially (CPU-bound); `OMP_NUM_THREADS`, `cpus` and `mem_limit` in `compose.yaml` cap what it takes from the host. `GUESTSHOTS_CACHE_TTL_HOURS` controls how long downloaded videos stay for re-runs.
+Tuning: one worker processes jobs sequentially (CPU-bound); `cpus` and `mem_limit` in `compose.yaml` cap what it takes from the host — keep `OMP_NUM_THREADS` and `GUESTSHOTS_THREADS` equal to `cpus` (onnxruntime otherwise spawns a spinning thread per host core and runs ~10x slower under a quota). An 84-minute 1080p episode takes ~8 min on 6 Zen 5 cores. `GUESTSHOTS_CACHE_TTL_HOURS` controls how long downloaded videos stay for re-runs.
 
 ## How it works
 

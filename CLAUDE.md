@@ -8,4 +8,6 @@ CLI tool: YouTube podcast URL → N screenshots where the guest (not the host) l
 - Iterate on scoring using the cached detections (`cache/<id>/faces_1fps_v2.pkl`); only bump the cache version suffix when `FaceObs` fields change.
 - Landmark EARs cannot detect laugh-squints reliably; the LLM `eyes: open|squint|closed` gate is what actually keeps closed eyes out.
 - Full-res grabs are verified against the guest embedding because the 1-fps analysis frame can be 0.5 s off (camera cuts).
+- Web service: `guestshots/server.py` (FastAPI, jobs as dirs under `$GUESTSHOTS_DATA`, one worker thread, SSE, `X-Api-Key`), SPA in `guestshots/web/index.html` (host photos in IndexedDB). Image built by `.github/workflows/docker.yml` → `ghcr.io/tobsch/guestshots`. Deployed on Tobi's s1max (LXC 200 dockge, `https://guestshots.mhw.wtf`, stack dir `/home/tobias/stacks/guestshots`).
+- **onnxruntime in docker with a CPU quota**: without `intra_op_num_threads` = quota and `session.intra_op.allow_spinning=0`, ORT spawns one spinning thread per *host* core and throughput collapses 13x (0.9 vs 11.8 fps measured). `faces.get_app()` reads the cgroup quota / `GUESTSHOTS_THREADS`. Keep `cpus`, `OMP_NUM_THREADS`, `GUESTSHOTS_THREADS` in compose.yaml equal.
 - Everything in the repo is English. `hosts/`, `cache/`, `output/`, `.env` are gitignored.
