@@ -11,7 +11,8 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       GUESTSHOTS_JOB_TTL_DAYS: "7"
       GUESTSHOTS_CACHE_TTL_HOURS: "24"
-      OMP_NUM_THREADS: "6"
+      OMP_NUM_THREADS: "6"        # keep these two equal to `cpus` below
+      GUESTSHOTS_THREADS: "6"
     volumes:
       - ./data:/data
     cpus: 6

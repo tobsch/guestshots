@@ -46,17 +46,48 @@ def mesh_ear(img: np.ndarray, bbox: tuple[int, int, int, int]) -> float | None:
     return float((ear(MP_EYE_R) + ear(MP_EYE_L)) / 2)
 
 
+def _cgroup_cpu_quota() -> int:
+    """CPUs allowed by a cgroup v2 quota (docker --cpus), 0 if unlimited / not in a cgroup."""
+    try:
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()
+        return max(1, round(int(quota) / int(period))) if quota != "max" else 0
+    except (OSError, ValueError):
+        return 0
+
+
 def get_app():
+    """InsightFace bundle. Tunables (env): GUESTSHOTS_THREADS (onnxruntime intra-op threads — set this in
+    containers with a CPU quota, otherwise ORT spawns one thread per host core and thrashes),
+    GUESTSHOTS_DET_SIZE (detector input, default 640), GUESTSHOTS_CPU_ONLY=1 (skip CoreML)."""
     global _app
     if _app is None:
+        import os
         import onnxruntime as ort
         from insightface.app import FaceAnalysis
+        from insightface.model_zoo import model_zoo
 
-        providers = [p for p in ("CoreMLExecutionProvider", "CPUExecutionProvider")
-                     if p in ort.get_available_providers()]
+        threads = int(os.environ.get("GUESTSHOTS_THREADS", "0")) or _cgroup_cpu_quota()
+        if threads:
+            # Measured in a 6-CPU docker quota: ORT default (one spinning thread per host core) = 0.9 fps,
+            # 6 threads = 6 fps, 6 threads + no spinning = 11.8 fps.
+            orig_init = model_zoo.PickableInferenceSession.__init__
+
+            def init(self, model_path, **kw):
+                so = kw.get("sess_options") or ort.SessionOptions()
+                so.intra_op_num_threads = threads
+                so.inter_op_num_threads = 1
+                so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+                kw["sess_options"] = so
+                orig_init(self, model_path, **kw)
+
+            model_zoo.PickableInferenceSession.__init__ = init
+
+        wanted = ("CPUExecutionProvider",) if os.environ.get("GUESTSHOTS_CPU_ONLY") else ("CoreMLExecutionProvider", "CPUExecutionProvider")
+        providers = [p for p in wanted if p in ort.get_available_providers()]
+        det = int(os.environ.get("GUESTSHOTS_DET_SIZE", "640"))
         _app = FaceAnalysis(name="buffalo_l", providers=providers,
                             allowed_modules=["detection", "recognition", "landmark_2d_106"])
-        _app.prepare(ctx_id=0, det_size=(640, 640))
+        _app.prepare(ctx_id=0, det_size=(det, det))
     return _app
 
 
