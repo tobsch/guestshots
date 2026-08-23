@@ -62,7 +62,8 @@ PROMPT = (
 )
 
 
-def rate(images: list[Path], guest_hint: str = "", model: str = DEFAULT_MODEL) -> list[ShotRating]:
+def rate(images: list[Path], guest_hint: str = "", model: str = DEFAULT_MODEL) -> tuple[list[ShotRating], dict]:
+    """Rate candidate crops. Returns (ratings, usage) with usage = {prompt_tokens, completion_tokens, cost}."""
     content: list[dict] = []
     for i, p in enumerate(images):
         content.append({"type": "text", "text": f"Image {i}:"})
@@ -78,13 +79,12 @@ def rate(images: list[Path], guest_hint: str = "", model: str = DEFAULT_MODEL) -
     )
     u = resp.usage
     cost = getattr(u, "cost", None) or (getattr(u, "model_extra", {}) or {}).get("cost")
-    print(f"    LLM usage: {u.prompt_tokens} in / {u.completion_tokens} out"
-          + (f" → ${cost:.4f}" if cost is not None else ""))
+    usage = {"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens, "cost": cost}
     text = resp.choices[0].message.content or ""
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         raise RuntimeError(f"{model} returned no JSON: {text[:300]}")
     try:
-        return Ratings.model_validate(json.loads(m.group(0))).ratings
+        return Ratings.model_validate(json.loads(m.group(0))).ratings, usage
     except (json.JSONDecodeError, ValidationError) as e:
         raise RuntimeError(f"{model} returned unparsable ratings: {e}\n{text[:300]}") from e

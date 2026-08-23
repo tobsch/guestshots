@@ -10,7 +10,7 @@ from pathlib import Path
 
 from yt_dlp import YoutubeDL
 
-CACHE = Path(__file__).resolve().parent.parent / "cache"
+DEFAULT_CACHE = Path(__file__).resolve().parent.parent / "cache"
 
 
 @dataclass
@@ -30,10 +30,10 @@ def video_id(url: str) -> str:
     return m.group(1)
 
 
-def download(url: str, max_height: int = 1080) -> Video:
+def download(url: str, max_height: int = 1080, cache: Path = DEFAULT_CACHE) -> Video:
     """Download (cached) and return video metadata."""
     vid = video_id(url)
-    vdir = CACHE / vid
+    vdir = cache / vid
     vdir.mkdir(parents=True, exist_ok=True)
     meta_file = vdir / "meta.json"
 

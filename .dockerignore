@@ -1,0 +1,7 @@
+.venv
+cache
+output
+hosts
+.env
+.git
+__pycache__

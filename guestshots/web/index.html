@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>guestshots</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --fg:#e8eaf0; --mut:#8b93a7; --acc:#5b8cff; --ok:#3ecf8e; --err:#ff6b6b; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f5f6f8; --card:#fff; --line:#e2e5ea; --fg:#14161b; --mut:#667085; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif }
+  header { display:flex; align-items:center; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line) }
+  header h1 { font-size:18px; margin:0; font-weight:650 } header .sp { flex:1 }
+  main { max-width:1100px; margin:0 auto; padding:20px; display:grid; gap:20px }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px }
+  .card h2 { font-size:14px; margin:0 0 10px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em }
+  label { font-size:13px; color:var(--mut); display:block; margin-bottom:4px }
+  input[type=text],input[type=number],input[type=password],select { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); font:inherit }
+  .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px }
+  .row.wide { grid-template-columns:1fr }
+  button { padding:9px 14px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); font:inherit; cursor:pointer }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600 }
+  button.small { padding:4px 9px; font-size:13px }
+  button:disabled { opacity:.5; cursor:default }
+  .thumbs { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 }
+  .thumb { position:relative; width:72px; height:72px; border-radius:8px; overflow:hidden; border:1px solid var(--line) }
+  .thumb img { width:100%; height:100%; object-fit:cover }
+  .thumb button { position:absolute; top:2px; right:2px; padding:0 6px; line-height:18px; font-size:12px; border-radius:6px; background:rgba(0,0,0,.6); color:#fff; border:0 }
+  .drop { border:1px dashed var(--line); border-radius:8px; padding:14px; text-align:center; color:var(--mut); cursor:pointer }
+  .drop.over { border-color:var(--acc); color:var(--acc) }
+  .job { display:grid; gap:10px }
+  .job .head { display:flex; gap:10px; align-items:center; flex-wrap:wrap }
+  .job .title { font-weight:600; flex:1; min-width:200px }
+  .badge { font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--mut) }
+  .badge.done { color:var(--ok); border-color:var(--ok) } .badge.failed { color:var(--err); border-color:var(--err) } .badge.running { color:var(--acc); border-color:var(--acc) }
+  progress { width:100%; height:8px; accent-color:var(--acc) }
+  .log { font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--mut); white-space:pre-wrap; max-height:90px; overflow:auto }
+  .shots { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px }
+  .shot img { width:100%; border-radius:8px; border:1px solid var(--line); display:block }
+  .shot .meta { font-size:12px; color:var(--mut); margin-top:4px; display:flex; justify-content:space-between; gap:6px }
+  .shot .note { font-size:12px; color:var(--mut) }
+  a { color:var(--acc) } .mut { color:var(--mut); font-size:13px } .err { color:var(--err) }
+  details summary { cursor:pointer; color:var(--mut); font-size:13px }
+</style>
+</head>
+<body>
+<header>
+  <h1>guestshots</h1><span class="mut">flattering, active guest stills from a podcast video</span>
+  <span class="sp"></span>
+  <button class="small" id="keyBtn">API key</button>
+</header>
+<main>
+  <section class="card">
+    <h2>Host photos <span class="mut" style="text-transform:none">(stay in this browser, sent with every job)</span></h2>
+    <div class="row" style="grid-template-columns:1fr auto auto">
+      <select id="hostSet"></select>
+      <button class="small" id="newSet">New set</button>
+      <button class="small" id="delSet">Delete set</button>
+    </div>
+    <div class="thumbs" id="thumbs"></div>
+    <div class="drop" id="drop">Drop photos of the host here or click to choose</div>
+    <input type="file" id="file" accept="image/*" multiple hidden>
+  </section>
+
+  <section class="card">
+    <h2>New job</h2>
+    <div class="row wide"><div><label>YouTube URL</label><input type="text" id="url" placeholder="https://www.youtube.com/watch?v=…"></div></div>
+    <div class="row" style="margin-top:10px">
+      <div><label>Shots</label><input type="number" id="n" value="6" min="1" max="30"></div>
+      <div><label>Min gap (s)</label><input type="number" id="gap" value="20" min="0"></div>
+      <div><label>LLM model</label><select id="model">
+        <option value="openai/gpt-5.4-mini">openai/gpt-5.4-mini (≈1¢)</option>
+        <option value="anthropic/claude-sonnet-5">anthropic/claude-sonnet-5 (≈3.5¢)</option>
+        <option value="google/gemini-3.7-flash">google/gemini-3.7-flash (≈0.5¢)</option>
+        <option value="">no LLM (heuristics only)</option>
+      </select></div>
+      <div><label>&nbsp;</label><label style="color:var(--fg)"><input type="checkbox" id="solo" checked> guest alone in frame</label></div>
+    </div>
+    <div style="margin-top:12px; display:flex; gap:10px; align-items:center">
+      <button class="primary" id="go">Start</button><span class="mut" id="goMsg"></span>
+    </div>
+  </section>
+
+  <section id="jobs" style="display:grid; gap:14px"></section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = {
+  key: () => localStorage.getItem('gs_key') || '',
+  async fetch(path, opt = {}) {
+    opt.headers = Object.assign({'X-Api-Key': this.key()}, opt.headers || {});
+    const r = await fetch(path, opt);
+    if (r.status === 401) { askKey(); throw new Error('invalid API key'); }
+    if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m } catch {} throw new Error(m); }
+    return r;
+  },
+  img: (path) => path + (path.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(api.key()),
+};
+function askKey() {
+  const k = prompt('API key', api.key());
+  if (k !== null) { localStorage.setItem('gs_key', k.trim()); loadJobs(); }
+}
+$('#keyBtn').onclick = askKey;
+
+// ---------- host photo sets in IndexedDB ----------
+const db = {
+  open: () => new Promise((res, rej) => {
+    const r = indexedDB.open('guestshots', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('sets', {keyPath: 'name'});
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }),
+  async all() { const d = await this.open(); return new Promise(res => { const q = d.transaction('sets').objectStore('sets').getAll(); q.onsuccess = () => res(q.result); }); },
+  async put(set) { const d = await this.open(); return new Promise(res => { const t = d.transaction('sets', 'readwrite'); t.objectStore('sets').put(set); t.oncomplete = res; }); },
+  async del(name) { const d = await this.open(); return new Promise(res => { const t = d.transaction('sets', 'readwrite'); t.objectStore('sets').delete(name); t.oncomplete = res; }); },
+};
+let sets = [], cur = null;
+async function loadSets() {
+  try { sets = await db.all(); } catch { sets = []; }
+  if (!sets.length) { sets = [{name: 'default', photos: []}]; await db.put(sets[0]); }
+  const want = localStorage.getItem('gs_set');
+  cur = sets.find(s => s.name === want) || sets[0];
+  $('#hostSet').innerHTML = sets.map(s => `<option ${s === cur ? 'selected' : ''}>${s.name}</option>`).join('');
+  renderThumbs();
+}
+function renderThumbs() {
+  $('#thumbs').innerHTML = cur.photos.map((b, i) => `<div class="thumb"><img src="${URL.createObjectURL(b)}"><button data-i="${i}">×</button></div>`).join('')
+    || '<span class="mut">No host photos yet — without them the most frequent face is assumed to be the guest.</span>';
+  $('#thumbs').querySelectorAll('button').forEach(b => b.onclick = async () => { cur.photos.splice(+b.dataset.i, 1); await db.put(cur); renderThumbs(); });
+}
+$('#hostSet').onchange = e => { cur = sets.find(s => s.name === e.target.value); localStorage.setItem('gs_set', cur.name); renderThumbs(); };
+$('#newSet').onclick = async () => { const n = prompt('Name of the host set (e.g. "alphalist / Tobi")'); if (!n) return; const s = {name: n, photos: []}; await db.put(s); localStorage.setItem('gs_set', n); loadSets(); };
+$('#delSet').onclick = async () => { if (sets.length < 2 || !confirm(`Delete set "${cur.name}"?`)) return; await db.del(cur.name); localStorage.removeItem('gs_set'); loadSets(); };
+async function addFiles(files) {
+  for (const f of files) if (f.type.startsWith('image/')) cur.photos.push(f);
+  cur.photos = cur.photos.slice(0, 10);
+  await db.put(cur); renderThumbs();
+}
+$('#drop').onclick = () => $('#file').click();
+$('#file').onchange = e => addFiles(e.target.files);
+$('#drop').ondragover = e => { e.preventDefault(); $('#drop').classList.add('over'); };
+$('#drop').ondragleave = () => $('#drop').classList.remove('over');
+$('#drop').ondrop = e => { e.preventDefault(); $('#drop').classList.remove('over'); addFiles(e.dataTransfer.files); };
+
+// ---------- jobs ----------
+['n', 'gap', 'model'].forEach(id => { const v = localStorage.getItem('gs_' + id); if (v !== null) $('#' + id).value = v; $('#' + id).onchange = e => localStorage.setItem('gs_' + id, e.target.value); });
+if (localStorage.getItem('gs_solo') !== null) $('#solo').checked = localStorage.getItem('gs_solo') === '1';
+$('#solo').onchange = e => localStorage.setItem('gs_solo', e.target.checked ? '1' : '0');
+
+$('#go').onclick = async () => {
+  const url = $('#url').value.trim();
+  if (!url) return;
+  const fd = new FormData();
+  fd.append('url', url); fd.append('n', $('#n').value); fd.append('min_gap', $('#gap').value);
+  fd.append('solo_only', $('#solo').checked); fd.append('llm', !!$('#model').value);
+  if ($('#model').value) fd.append('llm_model', $('#model').value);
+  cur.photos.forEach((b, i) => fd.append('hosts', b, b.name || `host${i}.jpg`));
+  $('#go').disabled = true; $('#goMsg').textContent = 'uploading…';
+  try { await api.fetch('/api/jobs', {method: 'POST', body: fd}); $('#url').value = ''; $('#goMsg').textContent = ''; loadJobs(); }
+  catch (e) { $('#goMsg').textContent = e.message; $('#goMsg').className = 'err'; }
+  $('#go').disabled = false;
+};
+
+const streams = {};
+async function loadJobs() {
+  if (!api.key()) { askKey(); return; }
+  let jobs;
+  try { jobs = await (await api.fetch('/api/jobs')).json(); } catch (e) { $('#jobs').innerHTML = `<div class="card err">${e.message}</div>`; return; }
+  $('#jobs').innerHTML = jobs.map(j => `<div class="card job" id="job-${j.id}"></div>`).join('') || '<div class="card mut">No jobs yet.</div>';
+  jobs.forEach(renderJob);
+  jobs.filter(j => j.status === 'queued' || j.status === 'running').forEach(watch);
+}
+function watch(j) {
+  if (streams[j.id]) return;
+  const es = new EventSource(api.img(`/api/jobs/${j.id}/events`));
+  streams[j.id] = es;
+  es.onmessage = e => { const d = JSON.parse(e.data); renderJob(d); if (d.status === 'done' || d.status === 'failed') { es.close(); delete streams[j.id]; } };
+  es.onerror = () => { es.close(); delete streams[j.id]; setTimeout(loadJobs, 3000); };
+}
+const stageText = j => ({queued: `queued (#${j.queue_position})`, downloading: 'downloading video', extracting: 'extracting frames',
+  detecting: `detecting faces ${j.done}/${j.total}`, scoring: 'scoring', verifying: `verifying ${j.done}/${j.total}`,
+  ranking: 'LLM ranking', done: 'done', failed: 'failed'}[j.stage] || j.stage);
+function renderJob(j) {
+  const el = $(`#job-${j.id}`); if (!el) return;
+  const pct = j.total ? Math.round(100 * j.done / j.total) : (j.status === 'done' ? 100 : 0);
+  let body = '';
+  if (j.status === 'done') {
+    body = `<div class="shots">${j.shots.map(s => `<div class="shot"><a href="${api.img(`/api/jobs/${j.id}/shots/${s}`)}" target="_blank"><img loading="lazy" src="${api.img(`/api/jobs/${j.id}/shots/${s}`)}"></a><div class="meta"><span>${s.replace(/_score.*$/, '').replace(/^\d+_/, '')}</span><a href="${api.img(`/api/jobs/${j.id}/shots/${s}`)}" download>save</a></div></div>`).join('')}</div>
+      <div style="display:flex; gap:10px; align-items:center"><a href="${api.img(`/api/jobs/${j.id}/shots.zip`)}">Download all (zip)</a>
+      <a href="${api.img(`/api/jobs/${j.id}/contact_sheet.jpg`)}" target="_blank">contact sheet</a>
+      <a href="${api.img(`/api/jobs/${j.id}/report.json`)}" target="_blank">report</a></div>`;
+    fetch(api.img(`/api/jobs/${j.id}/report.json`)).then(r => r.json()).then(rep => {
+      el.querySelectorAll('.shot').forEach((s, i) => { const p = rep.shots[i]?.parts || {}; if (p.llm_note) s.insertAdjacentHTML('beforeend', `<div class="note">${p.llm_note}</div>`); });
+      if (rep.llm_usage?.cost != null) el.querySelector('.badge.cost').textContent = `$${rep.llm_usage.cost.toFixed(3)}`;
+    }).catch(() => {});
+  } else if (j.status === 'failed') {
+    body = `<div class="err">${j.error}</div>`;
+  } else {
+    body = `<progress value="${pct}" max="100"></progress>`;
+  }
+  el.innerHTML = `<div class="head"><span class="title">${j.title || j.url}</span>
+      <span class="badge ${j.status}">${stageText(j)}</span><span class="badge cost" style="${j.status === 'done' ? '' : 'display:none'}"></span>
+      <span class="mut">${new Date(j.created * 1000).toLocaleString()}</span>
+      <button class="small" onclick="delJob('${j.id}')" ${j.status === 'running' ? 'disabled' : ''}>delete</button></div>
+    ${body}
+    <details><summary>log · <a href="${j.url}" target="_blank">${j.url}</a></summary><div class="log">${(j.log || []).join('\n')}</div></details>`;
+}
+async function delJob(id) { if (!confirm('Delete this job and its images?')) return; try { await api.fetch(`/api/jobs/${id}`, {method: 'DELETE'}); } catch (e) { alert(e.message); } loadJobs(); }
+
+loadSets(); loadJobs();
+</script>
+</body>
+</html>

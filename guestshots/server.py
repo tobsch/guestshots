@@ -1,0 +1,367 @@
+"""guestshots web service: REST API + single-page web app.
+
+State = directories on disk (no database):
+  $GUESTSHOTS_DATA/jobs/<id>/job.json, hosts/, out/{shots,contact_sheet.jpg,report.json,...}
+  $GUESTSHOTS_DATA/cache/<video id>/  (downloaded video + frames + detections, TTL-cleaned)
+One worker thread processes jobs sequentially (the pipeline is CPU-bound).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import os
+import shutil
+import threading
+import time
+import uuid
+import zipfile
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from queue import Queue
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+
+from . import pipeline as P
+
+DATA = Path(os.environ.get("GUESTSHOTS_DATA", "/data"))
+JOBS = DATA / "jobs"
+CACHE = DATA / "cache"
+API_KEY = os.environ.get("GUESTSHOTS_API_KEY", "")
+JOB_TTL = float(os.environ.get("GUESTSHOTS_JOB_TTL_DAYS", "7")) * 86400
+CACHE_TTL = float(os.environ.get("GUESTSHOTS_CACHE_TTL_HOURS", "24")) * 3600
+MAX_HOSTS = 10
+WEB = Path(__file__).parent / "web" / "index.html"
+
+app = FastAPI(title="guestshots", docs_url="/api/docs", openapi_url="/api/openapi.json")
+
+
+# ---------- auth ----------
+
+def require_key(request: Request) -> None:
+    if not API_KEY:
+        raise HTTPException(500, "GUESTSHOTS_API_KEY not configured")
+    key = request.headers.get("x-api-key") or request.query_params.get("key")
+    if key != API_KEY:
+        raise HTTPException(401, "invalid api key")
+
+
+# ---------- jobs on disk ----------
+
+@dataclass
+class Job:
+    id: str
+    url: str
+    opts: dict
+    created: float
+    status: str = "queued"       # queued | running | done | failed
+    stage: str = "queued"
+    done: int = 0
+    total: int = 0
+    title: str = ""
+    log: list[str] = field(default_factory=list)
+    error: str | None = None
+    shots: list[str] = field(default_factory=list)
+    finished: float | None = None
+    n_hosts: int = 0
+
+    @property
+    def dir(self) -> Path:
+        return JOBS / self.id
+
+    def save(self) -> None:
+        tmp = self.dir / "job.json.tmp"
+        tmp.write_text(json.dumps(asdict(self)))
+        tmp.replace(self.dir / "job.json")
+
+    @classmethod
+    def load(cls, d: Path) -> "Job":
+        return cls(**json.loads((d / "job.json").read_text()))
+
+
+_jobs: dict[str, Job] = {}
+_lock = threading.Lock()
+_queue: Queue[str] = Queue()
+
+
+def _public(j: Job) -> dict:
+    d = asdict(j)
+    d["queue_position"] = (
+        [x for x in sorted(_jobs.values(), key=lambda x: x.created) if x.status == "queued"].index(j) + 1
+        if j.status == "queued" else None)
+    return d
+
+
+def _worker() -> None:
+    while True:
+        jid = _queue.get()
+        j = _jobs.get(jid)
+        if not j or j.status != "queued":
+            continue
+
+        def progress(stage: str, done: int = 0, total: int = 0, msg: str = "") -> None:
+            with _lock:
+                j.stage, j.done, j.total = stage, done, total
+                if msg:
+                    j.log.append(msg)
+                    j.log = j.log[-50:]
+                if stage == "extracting" and msg:
+                    j.title = msg.split(" (")[0]
+                j.save()
+
+        with _lock:
+            j.status = "running"
+            j.save()
+        try:
+            refs = sorted((j.dir / "hosts").glob("*"))
+            host_embs = P.host_embeddings(refs)
+            opts = P.Options(**j.opts)
+            a = P.analyze(j.url, CACHE, opts.fps, progress)
+            P.mark_hosts([a], host_embs, opts.host_sim)
+            res = P.produce(a, opts, j.dir / "out", progress)
+            with _lock:
+                j.status, j.stage = "done", "done"
+                j.title = a.vid.title
+                j.shots = [p.name for p in res.shots]
+        except Exception as e:  # noqa: BLE001 — whatever failed, the job failed
+            with _lock:
+                j.status, j.stage, j.error = "failed", "failed", f"{type(e).__name__}: {e}"
+        finally:
+            shutil.rmtree(j.dir / "hosts", ignore_errors=True)  # stateless: host photos never outlive the job
+            shutil.rmtree(j.dir / "out" / "candidates", ignore_errors=True)
+            with _lock:
+                j.finished = time.time()
+                j.save()
+
+
+def _janitor() -> None:
+    while True:
+        now = time.time()
+        with _lock:
+            for j in list(_jobs.values()):
+                if j.status in ("done", "failed") and now - (j.finished or j.created) > JOB_TTL:
+                    shutil.rmtree(j.dir, ignore_errors=True)
+                    _jobs.pop(j.id, None)
+        active = {P_video_id(j.url) for j in _jobs.values() if j.status in ("queued", "running")}
+        for d in CACHE.glob("*"):
+            if d.is_dir() and d.name not in active and now - d.stat().st_mtime > CACHE_TTL:
+                shutil.rmtree(d, ignore_errors=True)
+        time.sleep(600)
+
+
+def P_video_id(url: str) -> str:
+    try:
+        return P.V.video_id(url)
+    except ValueError:
+        return ""
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    JOBS.mkdir(parents=True, exist_ok=True)
+    CACHE.mkdir(parents=True, exist_ok=True)
+    for d in sorted(JOBS.glob("*")):
+        if (d / "job.json").exists():
+            j = Job.load(d)
+            if j.status == "running":
+                j.status, j.stage = "queued", "queued"  # server restarted mid-job → redo
+                j.log.append("server restarted, job re-queued")
+                j.save()
+            _jobs[j.id] = j
+    for j in sorted(_jobs.values(), key=lambda x: x.created):
+        if j.status == "queued":
+            _queue.put(j.id)
+    threading.Thread(target=_worker, daemon=True, name="worker").start()
+    threading.Thread(target=_janitor, daemon=True, name="janitor").start()
+    # warm the models so the first job doesn't pay for it
+    threading.Thread(target=lambda: (P.F.get_app(), P.F.get_mesh()), daemon=True).start()
+
+
+# ---------- API ----------
+
+async def _create_job(url: str, hosts: list[UploadFile], n: int, solo_only: bool, min_gap: float,
+                      llm: bool, llm_model: str, llm_pool: int, guest_id: int | None, host_sim: float) -> Job:
+    if not P_video_id(url):
+        raise HTTPException(400, "not a YouTube URL")
+    if len(hosts) > MAX_HOSTS:
+        raise HTTPException(400, f"max {MAX_HOSTS} host photos")
+    j = Job(id=uuid.uuid4().hex[:12], url=url, created=time.time(),
+            opts=asdict(P.Options(n=max(1, min(n, 30)), min_gap=min_gap, solo_only=solo_only, llm=llm,
+                                  llm_model=llm_model, llm_pool=max(1, min(llm_pool, 8)),
+                                  guest_id=guest_id, host_sim=host_sim)),
+            n_hosts=len(hosts))
+    (j.dir / "hosts").mkdir(parents=True)
+    for i, h in enumerate(hosts):
+        ext = Path(h.filename or "x.jpg").suffix.lower() or ".jpg"
+        if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+            raise HTTPException(400, f"unsupported host photo type {ext}")
+        (j.dir / "hosts" / f"host{i}{ext}").write_bytes(await h.read())
+    with _lock:
+        j.save()
+        _jobs[j.id] = j
+    _queue.put(j.id)
+    return j
+
+
+@app.post("/api/jobs", status_code=202, dependencies=[Depends(require_key)])
+async def create_job(
+    url: str = Form(...), hosts: list[UploadFile] = File(default=[]),
+    n: int = Form(5), solo_only: bool = Form(False), min_gap: float = Form(20.0),
+    llm: bool = Form(True), llm_model: str = Form("openai/gpt-5.4-mini"), llm_pool: int = Form(4),
+    guest_id: int | None = Form(None), host_sim: float = Form(0.45),
+):
+    j = await _create_job(url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
+    return _public(j)
+
+
+@app.get("/api/jobs", dependencies=[Depends(require_key)])
+def list_jobs():
+    with _lock:
+        return [_public(j) for j in sorted(_jobs.values(), key=lambda x: x.created, reverse=True)]
+
+
+def _get(jid: str) -> Job:
+    j = _jobs.get(jid)
+    if not j:
+        raise HTTPException(404, "no such job")
+    return j
+
+
+@app.get("/api/jobs/{jid}", dependencies=[Depends(require_key)])
+def get_job(jid: str):
+    with _lock:
+        return _public(_get(jid))
+
+
+@app.delete("/api/jobs/{jid}", dependencies=[Depends(require_key)])
+def delete_job(jid: str):
+    with _lock:
+        j = _get(jid)
+        if j.status == "running":
+            raise HTTPException(409, "job is running")
+        shutil.rmtree(j.dir, ignore_errors=True)
+        _jobs.pop(jid, None)
+    return {"deleted": jid}
+
+
+@app.get("/api/jobs/{jid}/events", dependencies=[Depends(require_key)])
+async def job_events(jid: str):
+    _get(jid)
+
+    async def gen():
+        last = None
+        while True:
+            with _lock:
+                j = _jobs.get(jid)
+                if not j:
+                    break
+                snap = json.dumps(_public(j))
+            if snap != last:
+                yield f"data: {snap}\n\n"
+                last = snap
+            if j.status in ("done", "failed"):
+                break
+            await asyncio.sleep(1)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _file(j: Job, rel: str) -> FileResponse:
+    p = (j.dir / "out" / rel).resolve()
+    if not p.is_relative_to(j.dir.resolve()) or not p.is_file():
+        raise HTTPException(404, "not found")
+    return FileResponse(p)
+
+
+@app.get("/api/jobs/{jid}/shots/{name}", dependencies=[Depends(require_key)])
+def get_shot(jid: str, name: str):
+    return _file(_get(jid), f"shots/{name}")
+
+
+@app.get("/api/jobs/{jid}/contact_sheet.jpg", dependencies=[Depends(require_key)])
+def get_sheet(jid: str):
+    return _file(_get(jid), "contact_sheet.jpg")
+
+
+@app.get("/api/jobs/{jid}/report.json", dependencies=[Depends(require_key)])
+def get_report(jid: str):
+    return _file(_get(jid), "report.json")
+
+
+@app.get("/api/jobs/{jid}/identities/{name}", dependencies=[Depends(require_key)])
+def get_identity(jid: str, name: str):
+    return _file(_get(jid), f"identities/{name}")
+
+
+@app.get("/api/jobs/{jid}/identities", dependencies=[Depends(require_key)])
+def list_identities(jid: str):
+    j = _get(jid)
+    return sorted(p.name for p in (j.dir / "out" / "identities").glob("*.jpg"))
+
+
+def _zip(j: Job) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        for name in j.shots:
+            z.write(j.dir / "out" / "shots" / name, name)
+        for extra in ("contact_sheet.jpg", "report.json"):
+            if (j.dir / "out" / extra).exists():
+                z.write(j.dir / "out" / extra, extra)
+    return buf.getvalue()
+
+
+@app.get("/api/jobs/{jid}/shots.zip", dependencies=[Depends(require_key)])
+def get_zip(jid: str):
+    j = _get(jid)
+    if j.status != "done":
+        raise HTTPException(409, f"job is {j.status}")
+    return Response(_zip(j), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="guestshots_{P_video_id(j.url)}.zip"'})
+
+
+@app.post("/api/shots", dependencies=[Depends(require_key)])
+async def sync_shots(
+    url: str = Form(...), hosts: list[UploadFile] = File(default=[]),
+    n: int = Form(5), solo_only: bool = Form(False), min_gap: float = Form(20.0),
+    llm: bool = Form(True), llm_model: str = Form("openai/gpt-5.4-mini"), llm_pool: int = Form(4),
+    guest_id: int | None = Form(None), host_sim: float = Form(0.45), timeout: int = Form(2700),
+):
+    """Synchronous variant: blocks until the job is done and returns the ZIP (for scripts / agents)."""
+    j = await _create_job(url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
+    t0 = time.time()
+    while j.status not in ("done", "failed"):
+        if time.time() - t0 > timeout:
+            raise HTTPException(504, f"job {j.id} still {j.status}; poll /api/jobs/{j.id}")
+        await asyncio.sleep(2)
+    if j.status == "failed":
+        raise HTTPException(422, j.error or "failed")
+    return Response(_zip(j), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="guestshots_{P_video_id(j.url)}.zip"',
+                             "X-Job-Id": j.id})
+
+
+@app.get("/api/health")
+def health():
+    with _lock:
+        return {"ok": True, "jobs": len(_jobs),
+                "running": sum(1 for j in _jobs.values() if j.status == "running"),
+                "queued": sum(1 for j in _jobs.values() if j.status == "queued"),
+                "llm": bool(os.environ.get("OPENROUTER_API_KEY"))}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return WEB.read_text()
+
+
+@app.exception_handler(HTTPException)
+async def _http_exc(_, exc: HTTPException):
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+
+
+def main() -> None:
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8765")), log_level="info")

@@ -1,0 +1,18 @@
+# Dockge stack "guestshots" — put this in /home/tobias/stacks/guestshots/compose.yaml
+services:
+  guestshots:
+    image: ghcr.io/tobsch/guestshots:latest
+    container_name: guestshots
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      GUESTSHOTS_API_KEY: ${GUESTSHOTS_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      GUESTSHOTS_JOB_TTL_DAYS: "7"
+      GUESTSHOTS_CACHE_TTL_HOURS: "24"
+      OMP_NUM_THREADS: "6"
+    volumes:
+      - ./data:/data
+    cpus: 6
+    mem_limit: 6g

@@ -17,10 +17,14 @@ dependencies = [
     "rich>=13",
     "mediapipe==0.10.14",
     "protobuf>=4.25.3,<5",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
 ]
 
 [project.scripts]
 guestshots = "guestshots.cli:app"
+guestshots-server = "guestshots.server:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -28,3 +32,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["guestshots"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"guestshots/web" = "guestshots/web"
