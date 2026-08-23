@@ -76,6 +76,13 @@
       </select></div>
       <div><label>&nbsp;</label><label style="color:var(--fg)"><input type="checkbox" id="solo" checked> guest alone in frame</label></div>
     </div>
+    <div class="row" style="margin-top:10px; grid-template-columns:220px 1fr">
+      <div><label>Profile</label><select id="profile">
+        <option value="">default (screenshots)</option>
+        <option value="portrait">portrait — quote-graphic backgrounds (gaze at camera, no hand at face, room below chin)</option>
+      </select></div>
+      <div><label>Extra criteria for the LLM (optional)</label><input type="text" id="criteria" maxlength="500" placeholder="e.g. no strong reflections in the glasses, no coffee cup in frame"></div>
+    </div>
     <div style="margin-top:12px; display:flex; gap:10px; align-items:center">
       <button class="primary" id="go">Start</button><span class="mut" id="goMsg"></span>
     </div>
@@ -143,7 +150,7 @@ $('#drop').ondragleave = () => $('#drop').classList.remove('over');
 $('#drop').ondrop = e => { e.preventDefault(); $('#drop').classList.remove('over'); addFiles(e.dataTransfer.files); };
 
 // ---------- jobs ----------
-['n', 'gap', 'model'].forEach(id => { const v = localStorage.getItem('gs_' + id); if (v !== null) $('#' + id).value = v; $('#' + id).onchange = e => localStorage.setItem('gs_' + id, e.target.value); });
+['n', 'gap', 'model', 'profile', 'criteria'].forEach(id => { const v = localStorage.getItem('gs_' + id); if (v !== null) $('#' + id).value = v; $('#' + id).onchange = e => localStorage.setItem('gs_' + id, e.target.value); });
 if (localStorage.getItem('gs_solo') !== null) $('#solo').checked = localStorage.getItem('gs_solo') === '1';
 $('#solo').onchange = e => localStorage.setItem('gs_solo', e.target.checked ? '1' : '0');
 
@@ -154,6 +161,8 @@ $('#go').onclick = async () => {
   fd.append('url', url); fd.append('n', $('#n').value); fd.append('min_gap', $('#gap').value);
   fd.append('solo_only', $('#solo').checked); fd.append('llm', !!$('#model').value);
   if ($('#model').value) fd.append('llm_model', $('#model').value);
+  if ($('#profile').value) fd.append('profile', $('#profile').value);
+  if ($('#criteria').value.trim()) fd.append('criteria', $('#criteria').value.trim());
   cur.photos.forEach((b, i) => fd.append('hosts', b, b.name || `host${i}.jpg`));
   $('#go').disabled = true; $('#goMsg').textContent = 'uploading…';
   try { await api.fetch('/api/jobs', {method: 'POST', body: fd}); $('#url').value = ''; $('#goMsg').textContent = ''; loadJobs(); }
@@ -192,6 +201,9 @@ function renderJob(j) {
     fetch(api.img(`/api/jobs/${j.id}/report.json`)).then(r => r.json()).then(rep => {
       el.querySelectorAll('.shot').forEach((s, i) => { const p = rep.shots[i]?.parts || {}; if (p.llm_note) s.insertAdjacentHTML('beforeend', `<div class="note">${p.llm_note}</div>`); });
       if (rep.llm_usage?.cost != null) el.querySelector('.badge.cost').textContent = `$${rep.llm_usage.cost.toFixed(3)}`;
+      const rej = rep.llm_rejected && Object.entries(rep.llm_rejected).map(([k, v]) => `${v} ${k}`).join(', ');
+      if (rep.requested && rep.shots.length < rep.requested) el.querySelector('.shots').insertAdjacentHTML('beforebegin', `<div class="err">Only ${rep.shots.length} of ${rep.requested} shots passed the gates${rej ? ` (rejected: ${rej})` : ''} — relax the profile/criteria or raise the candidate pool.</div>`);
+      else if (rej) el.querySelector('.shots').insertAdjacentHTML('afterend', `<div class="mut">LLM rejected: ${rej}</div>`);
     }).catch(() => {});
   } else if (j.status === 'failed') {
     body = `<div class="err">${j.error}</div>`;

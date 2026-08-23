@@ -9,7 +9,7 @@ import json
 import pickle
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +27,13 @@ def _noop(stage: str, done: int = 0, total: int = 0, msg: str = "") -> None:
     pass
 
 
+PROFILES: dict[str, dict] = {
+    # Stills meant as background for quote graphics: guest alone, looking at the camera, no hand at the
+    # face, face in the upper part of the frame so there is room for text below the chin.
+    "portrait": {"solo_only": True, "require_gaze_camera": True, "max_face_bottom": 0.55, "llm_pool": 6},
+}
+
+
 @dataclass
 class Options:
     n: int = 5
@@ -38,6 +45,19 @@ class Options:
     llm: bool = True
     llm_model: str = "openai/gpt-5.4-mini"
     llm_pool: int = 4
+    criteria: str = ""                    # free-text extra requirements for the LLM stage
+    require_gaze_camera: bool = False     # LLM gate: guest must look into the camera
+    max_face_bottom: float | None = None  # drop shots whose face box bottom is below this fraction of frame height
+    profile: str | None = None            # name from PROFILES; explicit values win over the profile
+
+    @classmethod
+    def build(cls, profile: str | None = None, **explicit) -> "Options":
+        """Profile defaults, overridden by explicitly passed values (None = not passed)."""
+        if profile and profile not in PROFILES:
+            raise ValueError(f"unknown profile {profile!r}; known: {sorted(PROFILES)}")
+        values = dict(PROFILES.get(profile or "", {}))
+        values.update({k: v for k, v in explicit.items() if v is not None})
+        return cls(profile=profile, **values)
 
 
 @dataclass
@@ -172,6 +192,13 @@ def produce(a: Analysis, opts: Options, out: Path, progress: Progress = _noop) -
         return float(m.mean()) if m.size else 0.0
 
     guest_obs = [o for o in obs if o.identity == guest.id]
+    if opts.max_face_bottom is not None and guest_obs:
+        ah = cv2.imread(str(guest_obs[0].frame)).shape[0]  # analysis frame height; same aspect as full-res
+        kept = [o for o in guest_obs if o.bbox[3] / ah <= opts.max_face_bottom]
+        progress("scoring", 0, 0, f"face-bottom filter ≤{opts.max_face_bottom:g}: {len(kept)}/{len(guest_obs)} frames kept")
+        guest_obs = kept
+    if not guest_obs:
+        raise PipelineError("no guest frames left after filtering")
     calib = Calib.from_obs(guest_obs, [face_motion(o) for o in guest_obs])
     median_area = float(np.median([o.area_frac for o in guest_obs]))
     scored: list[Scored] = []
@@ -214,6 +241,13 @@ def produce(a: Analysis, opts: Options, out: Path, progress: Progress = _noop) -
             full.unlink(missing_ok=True)
             continue
         c.obs.bbox = hit.bbox
+        fh, fw = img.shape[:2]
+        bx1, by1, bx2, by2 = [v * scale for v in hit.bbox]
+        c.parts["face"] = {"x": round(bx1 / fw, 4), "y": round(by1 / fh, 4),
+                           "w": round((bx2 - bx1) / fw, 4), "h": round((by2 - by1) / fh, 4)}
+        if opts.max_face_bottom is not None and by2 / fh > opts.max_face_bottom:
+            full.unlink(missing_ok=True)
+            continue
         F.save_crop(c.obs, cand_dir / f"t{int(c.obs.t):05d}.jpg", pad=0.8, img=img, scale=scale)
         verified.append(c)
     pool = verified
@@ -222,17 +256,39 @@ def produce(a: Analysis, opts: Options, out: Path, progress: Progress = _noop) -
 
     picks = pool
     usage = None
+    gates: dict[str, int] = {}
     if use_llm:
         progress("ranking", 0, len(pool), f"asking {opts.llm_model} to rank {len(pool)} candidates")
         imgs = [cand_dir / f"t{int(c.obs.t):05d}.jpg" for c in pool]
-        ratings, usage = vision.rate(imgs, guest_hint=vid.title, model=opts.llm_model)
-        for r in ratings:
-            if 0 <= r.index < len(pool):
-                c = pool[r.index]
-                c.parts.update(llm_flattering=r.flattering, llm_active=r.active, llm_eyes=r.eyes, llm_note=r.note)
-                llm_score = 0 if not r.ok else (0.6 * r.flattering + 0.4 * r.active) / 10
-                c.score = 0.35 * c.score + 0.65 * llm_score
-        picks = select_diverse(pool, opts.n, min_gap=opts.min_gap)
+        ratings, usage = vision.rate(imgs, guest_hint=vid.title, model=opts.llm_model, criteria=opts.criteria)
+        passed: list[Scored] = []
+        gated: dict[str, int] = {"eyes": 0, "hand_near_face": 0, "gaze": 0, "unusable": 0, "unrated": 0}
+        rated = {r.index: r for r in ratings if 0 <= r.index < len(pool)}
+        for i, c in enumerate(pool):
+            r = rated.get(i)
+            if r is None:
+                gated["unrated"] += 1
+                continue
+            c.parts.update(llm_flattering=r.flattering, llm_active=r.active, llm_eyes=r.eyes,
+                           llm_gaze=r.gaze, llm_hand_near_face=r.hand_near_face, llm_note=r.note)
+            if r.eyes.strip().lower() != "open":
+                gated["eyes"] += 1
+            elif r.hand_near_face:
+                gated["hand_near_face"] += 1
+            elif opts.require_gaze_camera and r.gaze.strip().lower() != "camera":
+                gated["gaze"] += 1
+            elif r.usable is False:
+                gated["unusable"] += 1
+            else:
+                c.score = 0.35 * c.score + 0.65 * (0.6 * r.flattering + 0.4 * r.active) / 10
+                passed.append(c)
+        gates = {k: v for k, v in gated.items() if v}
+        progress("ranking", len(pool), len(pool), f"{len(passed)}/{len(pool)} candidates passed the LLM gates"
+                 + (f" (rejected: {gates})" if gates else ""))
+        picks = select_diverse(passed, opts.n, min_gap=opts.min_gap)
+        if len(picks) < opts.n:
+            progress("ranking", len(pool), len(pool),
+                     f"only {len(picks)} of {opts.n} requested shots passed — relax the gates or raise llm_pool")
 
     shots_dir = out / "shots"
     shots_dir.mkdir(exist_ok=True)
@@ -244,9 +300,10 @@ def produce(a: Analysis, opts: Options, out: Path, progress: Progress = _noop) -
         fn = shots_dir / f"{k:02d}_{int(t) // 60:02d}m{int(t) % 60:02d}s_score{c.score:.2f}.jpg"
         (cand_dir / f"full_t{int(t):05d}.jpg").rename(fn)
         shots.append(fn)
+        parts = {k2: (round(v, 3) if isinstance(v, float) else v) for k2, v in c.parts.items()}
         report.append({"rank": k, "t": round(t, 2), "file": fn.name, "score": round(c.score, 3),
-                       "solo": c.solo, "bbox_analysis": c.obs.bbox,
-                       "parts": {k2: (round(v, 3) if isinstance(v, float) else v) for k2, v in c.parts.items()}})
+                       "solo": c.solo, "face": parts.pop("face", None), "bbox_analysis": c.obs.bbox,
+                       "parts": parts})
     for f in cand_dir.glob("full_*.jpg"):
         f.unlink()
     sheet = [cv2.resize(cv2.imread(str(p)), (640, 360)) for p in shots]
@@ -254,6 +311,7 @@ def produce(a: Analysis, opts: Options, out: Path, progress: Progress = _noop) -
     sheet_path = out / "contact_sheet.jpg"
     cv2.imwrite(str(sheet_path), np.vstack([np.hstack(sheet[i:i + 3]) for i in range(0, len(sheet), 3)]))
     rep = {"url": f"https://youtu.be/{vid.id}", "title": vid.title, "guest_identity": guest.id,
+           "options": asdict(opts), "requested": opts.n, "llm_rejected": gates,
            "host_identities": sorted(host_ids), "llm": opts.llm_model if use_llm else None,
            "llm_usage": usage, "shots": report}
     (out / "report.json").write_text(json.dumps(rep, indent=2))

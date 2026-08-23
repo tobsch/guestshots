@@ -52,6 +52,10 @@ uv run guestshots URL1 URL2 URL3            # several episodes in one go
 | `--llm / --no-llm` | on | LLM re-ranking via OpenRouter |
 | `--llm-model` | `openai/gpt-5.4-mini` | Any OpenRouter vision model, e.g. `anthropic/claude-sonnet-5` |
 | `--llm-pool` | 4 | Candidates per final shot sent to the LLM (n × pool images) |
+| `--profile portrait` | — | Preset for quote-graphic backgrounds: solo, gaze at camera, no hand at face, face in upper 55 % of the frame, bigger candidate pool |
+| `--criteria "…"` | — | Free-text extra requirements for the vision LLM ("no hand in the picture") |
+| `--max-face-bottom 0.55` | — | Drop shots whose face box bottom is below this fraction of the frame height |
+| `--require-gaze-camera` | off | Only shots where the guest looks into the camera |
 
 Runtime: ~10 min for an 80-minute episode on the first run (download + face detection), seconds afterwards — video and detections are cached in `cache/`.
 
@@ -63,7 +67,7 @@ output/<id>_<title>/
   contact_sheet.jpg               ← all shots at a glance
   candidates/                     ← face crops the LLM saw
   identities/id0_host_x1423.jpg   ← who was recognised as whom (host / cand)
-  report.json                     ← timestamps, scores, LLM notes
+  report.json                     ← timestamps, scores, normalised face box per shot, LLM notes + rejections
 ```
 
 ## Web service (Docker)
@@ -81,7 +85,7 @@ Open `http://<host>:8765/`, enter the API key once, drop host photos, paste a UR
 
 | | |
 |---|---|
-| `POST /api/jobs` (multipart: `url`, `hosts[]`, `n`, `solo_only`, `min_gap`, `llm`, `llm_model`, `llm_pool`, `guest_id`) | → `202 {id, …}` |
+| `POST /api/jobs` (multipart: `url`, `hosts[]`, `n`, `solo_only`, `min_gap`, `llm`, `llm_model`, `llm_pool`, `guest_id`, `profile`, `criteria`, `max_face_bottom`, `require_gaze_camera`) | → `202 {id, …}` |
 | `GET /api/jobs`, `GET /api/jobs/{id}` | list / status (`queued · running · done · failed`, stage, progress, log) |
 | `GET /api/jobs/{id}/events` | server-sent events with the same JSON until done |
 | `GET /api/jobs/{id}/shots/{file}` | one screenshot (JPEG, full resolution) |
@@ -112,7 +116,7 @@ See [docs/agent-guide.md](docs/agent-guide.md) — an end-to-end guide written f
    - Otherwise: most frequent person = guest (with a warning). Fix with `--guest-id N`.
 4. **Per-frame scoring of the guest**, calibrated to the distribution in that video: eyes open (InsightFace **and** MediaPipe must agree), facing the camera, smile or moderately open "talking" mouth, motion in the face region (gesturing), sharpness, light, size, alone in frame. Blinks, laugh-squints, wide-open mouths and turned-away heads are dropped.
 5. Candidates are grabbed at full resolution and **verified** (the face in the frame must match the guest embedding) — the 1-fps analysis frame can sit up to 0.5 s off the exact timestamp, which at a camera cut would otherwise hand you the host.
-6. **LLM stage** (optional): the best `n × pool` crops go through OpenRouter to the vision model, which first classifies the eyes (`open|squint|closed` — only `open` is usable) and then rates "flattering" and "active" 1–10. Landmark models are unreliable on laugh-squints; a vision LLM with a full-res crop isn't.
+6. **LLM stage** (optional): the best `n × pool` crops go through OpenRouter to the vision model, which classifies eyes (`open|squint|closed`), gaze (`camera|away`) and hand-near-face, applies your free-text `criteria`, and rates "flattering" and "active" 1–10. Eyes not open, a hand at the face, a violated criterion (and gaze away with `--require-gaze-camera`) drop the candidate — you may get fewer than `n` shots, `report.json` says why (`llm_rejected`). Landmark models are unreliable on laugh-squints and can't see hands; a vision LLM with a full-res crop can.
 7. Top N with minimum spacing → `shots/`.
 
 ## Cost

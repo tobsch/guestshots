@@ -36,11 +36,16 @@ def main(
     solo_only: bool = typer.Option(False, help="Only frames where the guest is alone in the picture"),
     llm: bool = typer.Option(True, help="Re-rank top candidates with a vision LLM via OpenRouter (needs OPENROUTER_API_KEY)"),
     llm_model: str = typer.Option("openai/gpt-5.4-mini", help="OpenRouter model id for re-ranking"),
-    llm_pool: int = typer.Option(4, help="Candidates per final shot sent to the LLM (n × llm_pool)"),
+    llm_pool: int | None = typer.Option(None, help="Candidates per final shot sent to the LLM (n × llm_pool, default 4)"),
+    profile: str | None = typer.Option(None, help="Option preset: 'portrait' (quote-graphic backgrounds)"),
+    criteria: str = typer.Option("", help="Extra free-text requirements for the LLM stage, e.g. 'no glasses reflections'"),
+    max_face_bottom: float | None = typer.Option(None, help="Drop shots whose face box bottom is below this fraction of frame height (e.g. 0.55)"),
+    require_gaze_camera: bool | None = typer.Option(None, "--require-gaze-camera", help="LLM gate: guest must look into the camera"),
 ):
     """Download each video, find the guest (not the host), and save N flattering + active screenshots."""
-    opts = P.Options(n=n, fps=fps, min_gap=min_gap, host_sim=host_sim, guest_id=guest_id,
-                     solo_only=solo_only, llm=llm, llm_model=llm_model, llm_pool=llm_pool)
+    opts = P.Options.build(profile, n=n, fps=fps, min_gap=min_gap, host_sim=host_sim, guest_id=guest_id,
+                           solo_only=solo_only or None, llm=llm, llm_model=llm_model, llm_pool=llm_pool,
+                           criteria=criteria, max_face_bottom=max_face_bottom, require_gaze_camera=require_gaze_camera)
     refs = [p for p in sorted(host_dir.glob("*")) if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
     host_embs = P.host_embeddings(refs)
     if host_embs:
@@ -71,7 +76,7 @@ def main(
         con.print(f"  [green]✓ {len(res.shots)} shots → {res.out_dir / 'shots'}[/]")
         for r in res.report["shots"]:
             p = r["parts"]
-            note = (f"[{p['llm_eyes']}] {p['llm_note']}" if p.get("llm_note")
+            note = (f"[{p['llm_eyes']}/{p.get('llm_gaze', '?')}] {p['llm_note']}" if p.get("llm_note")
                     else f"eyes {p['eyes']:.2f} smile {p['smile']:.2f} speak {p['speaking']:.2f} motion {p['motion']:.2f}")
             con.print(f"    {r['file']}  {'solo' if r['solo'] else 'two-shot'}  {note}")
 

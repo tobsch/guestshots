@@ -191,16 +191,19 @@ def _startup() -> None:
 
 # ---------- API ----------
 
-async def _create_job(owner: str, url: str, hosts: list[UploadFile], n: int, solo_only: bool, min_gap: float,
-                      llm: bool, llm_model: str, llm_pool: int, guest_id: int | None, host_sim: float) -> Job:
+async def _create_job(owner: str, url: str, hosts: list[UploadFile], form: dict) -> Job:
     if not P_video_id(url):
         raise HTTPException(400, "not a YouTube URL")
     if len(hosts) > MAX_HOSTS:
         raise HTTPException(400, f"max {MAX_HOSTS} host photos")
-    j = Job(id=uuid.uuid4().hex[:12], url=url, created=time.time(),
-            opts=asdict(P.Options(n=max(1, min(n, 30)), min_gap=min_gap, solo_only=solo_only, llm=llm,
-                                  llm_model=llm_model, llm_pool=max(1, min(llm_pool, 8)),
-                                  guest_id=guest_id, host_sim=host_sim)),
+    try:
+        opts = P.Options.build(form.pop("profile"), **form)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    opts.n = max(1, min(opts.n, 30))
+    opts.llm_pool = max(1, min(opts.llm_pool, 8))
+    opts.criteria = opts.criteria[:500]
+    j = Job(id=uuid.uuid4().hex[:12], url=url, created=time.time(), opts=asdict(opts),
             n_hosts=len(hosts), owner=owner)
     (j.dir / "hosts").mkdir(parents=True)
     for i, h in enumerate(hosts):
@@ -219,11 +222,16 @@ async def _create_job(owner: str, url: str, hosts: list[UploadFile], n: int, sol
 async def create_job(
     owner: str = Depends(require_key),
     url: str = Form(...), hosts: list[UploadFile] = File(default=[]),
-    n: int = Form(5), solo_only: bool = Form(False), min_gap: float = Form(20.0),
-    llm: bool = Form(True), llm_model: str = Form("openai/gpt-5.4-mini"), llm_pool: int = Form(4),
-    guest_id: int | None = Form(None), host_sim: float = Form(0.45),
+    n: int | None = Form(None), solo_only: bool | None = Form(None), min_gap: float | None = Form(None),
+    llm: bool | None = Form(None), llm_model: str | None = Form(None), llm_pool: int | None = Form(None),
+    guest_id: int | None = Form(None), host_sim: float | None = Form(None),
+    profile: str | None = Form(None), criteria: str | None = Form(None),
+    max_face_bottom: float | None = Form(None), require_gaze_camera: bool | None = Form(None),
 ):
-    j = await _create_job(owner, url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
+    j = await _create_job(owner, url, hosts, dict(n=n, solo_only=solo_only, min_gap=min_gap, llm=llm, llm_model=llm_model,
+                                                  llm_pool=llm_pool, guest_id=guest_id, host_sim=host_sim, profile=profile,
+                                                  criteria=criteria, max_face_bottom=max_face_bottom,
+                                                  require_gaze_camera=require_gaze_camera))
     return _public(j)
 
 
@@ -337,12 +345,17 @@ def get_zip(jid: str, owner: str = Depends(require_key)):
 async def sync_shots(
     owner: str = Depends(require_key),
     url: str = Form(...), hosts: list[UploadFile] = File(default=[]),
-    n: int = Form(5), solo_only: bool = Form(False), min_gap: float = Form(20.0),
-    llm: bool = Form(True), llm_model: str = Form("openai/gpt-5.4-mini"), llm_pool: int = Form(4),
-    guest_id: int | None = Form(None), host_sim: float = Form(0.45), timeout: int = Form(2700),
+    n: int | None = Form(None), solo_only: bool | None = Form(None), min_gap: float | None = Form(None),
+    llm: bool | None = Form(None), llm_model: str | None = Form(None), llm_pool: int | None = Form(None),
+    guest_id: int | None = Form(None), host_sim: float | None = Form(None),
+    profile: str | None = Form(None), criteria: str | None = Form(None),
+    max_face_bottom: float | None = Form(None), require_gaze_camera: bool | None = Form(None), timeout: int = Form(2700),
 ):
     """Synchronous variant: blocks until the job is done and returns the ZIP (for scripts / agents)."""
-    j = await _create_job(owner, url, hosts, n, solo_only, min_gap, llm, llm_model, llm_pool, guest_id, host_sim)
+    j = await _create_job(owner, url, hosts, dict(n=n, solo_only=solo_only, min_gap=min_gap, llm=llm, llm_model=llm_model,
+                                                  llm_pool=llm_pool, guest_id=guest_id, host_sim=host_sim, profile=profile,
+                                                  criteria=criteria, max_face_bottom=max_face_bottom,
+                                                  require_gaze_camera=require_gaze_camera))
     t0 = time.time()
     while j.status not in ("done", "failed"):
         if time.time() - t0 > timeout:
@@ -353,6 +366,11 @@ async def sync_shots(
     return Response(_zip(j), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="guestshots_{P_video_id(j.url)}.zip"',
                              "X-Job-Id": j.id})
+
+
+@app.get("/api/profiles")
+def profiles():
+    return P.PROFILES
 
 
 @app.get("/api/health")
